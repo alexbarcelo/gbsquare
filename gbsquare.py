@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from collections import defaultdict
 from distutils.util import strtobool
 import json
 import logging
@@ -27,8 +28,16 @@ INFLUXDB_SSL = strtobool(os.getenv("INFLUXDB_SSL", "False"))
 INFLUXDB_VERIFY_SSL = strtobool(os.getenv("INFLUXDB_VERIFY_SSL", "False"))
 INFLUXDB_DATABASE = os.getenv("INFLUXDB_DATABASE", "miband")
 
+# The username, used for tagging data on influxdb as well as triggering webhooks on update
+USER_TAG = os.getenv("USER_TAG")
 # The user can provide a JSON for extra tags
 EXTRA_TAGS = json.loads(os.getenv("EXTRA_TAGS", "{}"))
+# Include the user tag, that we will be using anyways
+if USER_TAG:
+    EXTRA_TAGS["user"] = USER_TAG
+
+# A Webhook that will be called after every update / sync
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # By default, poll every 10 minutes (etag checking)
 POLLING_SLEEP = os.getenv("POLLING_SLEEP", 600)
@@ -44,7 +53,25 @@ ETAG_DB = None
 logger = logging.getLogger('gbsquare')
 
 
-def connect_to_influxdb():
+class TaggingDeviceID(dict[int, dict]):
+    """Manage the additional device_id tag.
+
+    Having a dictionary instance per each point seems overkill. However,
+    scanning a database can result in an enormous amount of points and only
+    a small number of devices. The `__missing__` method here ensures that a
+    dictionary instance is allocated *only* for each unique `device_id`.
+    """
+    def __init__(self, base_tags):
+        self._base_tags = base_tags
+        super()
+
+    def __missing__(self, key):
+        item = self._base_tags.copy()
+        item["device_id"] = key
+        return item
+    
+
+def connect_to_influxdb() -> InfluxDBClient:
     options = {
         "host": INFLUXDB_HOST,
         "port": INFLUXDB_PORT,
@@ -62,22 +89,23 @@ def connect_to_influxdb():
     return client
 
 
-def process_db(db_file, limit):
+def process_db(db_file: str, limit: int):
     con = sqlite3.connect(db_file)
     cur = con.cursor()
 
     client = connect_to_influxdb()
 
-    raw_datapoints = cur.execute('SELECT TIMESTAMP, RAW_INTENSITY, STEPS, RAW_KIND, HEART_RATE FROM `MI_BAND_ACTIVITY_SAMPLE` ORDER BY `TIMESTAMP` DESC LIMIT %d' % limit)
+    raw_datapoints = cur.execute('SELECT TIMESTAMP, RAW_INTENSITY, STEPS, RAW_KIND, HEART_RATE, DEVICE_ID FROM `MI_BAND_ACTIVITY_SAMPLE` ORDER BY `TIMESTAMP` DESC LIMIT %d' % limit)
     influx_points = list()
 
-    tags = EXTRA_TAGS
-    tags["origin"] = "gbsquare"
+    base_tags = EXTRA_TAGS
+    base_tags["origin"] = "gbsquare"    
+    tags = TaggingDeviceID(base_tags)
 
-    for timestamp, raw_intensity, steps, raw_kind, heart_rate in raw_datapoints:
+    for timestamp, raw_intensity, steps, raw_kind, heart_rate, device_id in raw_datapoints:
         p = {
             "measurement": "miBandActivitySample",
-            "tags": tags,
+            "tags": tags[int(device_id)],
             "time": timestamp,
             "fields": {
                 "raw_intensity": raw_intensity,
@@ -89,11 +117,13 @@ def process_db(db_file, limit):
 
         influx_points.append(p)
 
-    client.write_points(influx_points, time_precision="s")
+    logger.debug("I found a total of %d devices: %s", len(tags), list(tags.keys()))
 
+    client.write_points(influx_points, time_precision="s")
     con.close()
 
-def check_and_process_db(webdav_client, force_sync=False):
+
+def check_and_process_db(webdav_client: Client, force_sync=False) -> bool:
     global ETAG_DB
 
     new_etag = webdav_client.info(WEBDAV_PATH)["etag"]
@@ -103,7 +133,7 @@ def check_and_process_db(webdav_client, force_sync=False):
         if new_etag == ETAG_DB:
             # Nothing to do
             logger.debug("No changes detected, skipping update")
-            return
+            return False
 
     ETAG_DB = new_etag
 
@@ -111,6 +141,17 @@ def check_and_process_db(webdav_client, force_sync=False):
     with NamedTemporaryFile() as file:
         webdav_client.download(remote_path=WEBDAV_PATH, local_path=file.name)
         process_db(file.name, limit=-1 if force_sync else ENTRIES_TO_SYNC)
+
+    return True
+
+
+def trigger_webhook():
+    if not WEBHOOK_URL:
+        logger.info("No webhook URL configured, not calling anywhere")
+        return
+
+    logger.debug("Proceeding to webhook to %s", WEBHOOK_URL)
+    # ... WIP
 
 
 def main():
@@ -123,6 +164,11 @@ def main():
                  "\tWEBDAV_PASSWORD: %s\n", 
                  WEBDAV_HOSTNAME, WEBDAV_LOGIN, "*" * len(WEBDAV_PASSWORD))
 
+    if WEBHOOK_URL:
+        logger.info("Webhook has been configured to the following URL: %s", WEBHOOK_URL)
+    else:
+        logger.info("No webhook has been configured")
+
     logger.info("Extra tags that I will be using: %s", EXTRA_TAGS)
 
     webdav_client = Client({
@@ -134,11 +180,16 @@ def main():
     # Note that the check will always evaluate as True on startup
     check_and_process_db(webdav_client, force_sync=True)
 
+    trigger_webhook()
+
     logger.info("Starting application loop")
     while True:
         sleep(POLLING_SLEEP)
         logger.debug("Waking up from sleep, proceeding to poll WebDAV")
-        check_and_process_db(webdav_client, force_sync=False)
+        changed = check_and_process_db(webdav_client, force_sync=False)
+
+        if changed:
+            trigger_webhook()
 
 
 if __name__ == "__main__":
