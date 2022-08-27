@@ -48,6 +48,7 @@ ENTRIES_TO_SYNC = int(os.getenv("ENTRIES_TO_SYNC", 10080))
 # To debug or not to debug
 DEBUG = strtobool(os.getenv("DEBUG", "False"))
 
+MAX_POINTS_PER_REQUEST = 20000
 ETAG_DB = None
 
 logger = logging.getLogger('gbsquare')
@@ -102,6 +103,7 @@ def process_db(db_file: str, limit: int):
     base_tags["origin"] = "gbsquare"    
     tags = TaggingDeviceID(base_tags)
 
+    i = 0
     for timestamp, raw_intensity, steps, raw_kind, heart_rate, device_id in raw_datapoints:
         p = {
             "measurement": "miBandActivitySample",
@@ -114,8 +116,14 @@ def process_db(db_file: str, limit: int):
                 "heart_rate": heart_rate,
             }
         }
-
         influx_points.append(p)
+        
+        i += 1
+        if i > MAX_POINTS_PER_REQUEST:
+            logger.debug("Reached MAX_POINTS_PER_REQUEST (#%d), writing to InfluxDB", MAX_POINTS_PER_REQUEST)
+            client.write_points(influx_points, time_precision="s")
+            influx_points.clear()
+            i = 0
 
     logger.debug("I found a total of %d devices: %s", len(tags), list(tags.keys()))
 
