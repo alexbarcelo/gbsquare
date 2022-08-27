@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-from collections import defaultdict
 from distutils.util import strtobool
 import json
 import logging
@@ -10,6 +9,7 @@ from tempfile import NamedTemporaryFile
 from time import sleep
 from influxdb import InfluxDBClient
 
+import requests
 from webdav3.client import Client
 
 
@@ -117,7 +117,7 @@ def process_db(db_file: str, limit: int):
             }
         }
         influx_points.append(p)
-        
+
         i += 1
         if i > MAX_POINTS_PER_REQUEST:
             logger.debug("Reached MAX_POINTS_PER_REQUEST (#%d), writing to InfluxDB", MAX_POINTS_PER_REQUEST)
@@ -159,7 +159,11 @@ def trigger_webhook():
         return
 
     logger.debug("Proceeding to webhook to %s", WEBHOOK_URL)
-    # ... WIP
+    r = requests.post(WEBHOOK_URL, json={"user": USER_TAG})
+    if r.status_code == 200:
+        logger.info("Webhook triggered and successful")
+    else:
+        logger.warning("Error when calling %s. Status code: %d", WEBHOOK_URL, r.status_code)
 
 
 def main():
