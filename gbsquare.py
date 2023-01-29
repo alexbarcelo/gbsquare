@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from distutils.util import strtobool
+from datetime import datetime
 import json
 import logging
 import os
@@ -54,24 +55,6 @@ ETAG_DB = None
 logger = logging.getLogger('gbsquare')
 
 
-class TaggingDeviceID(dict[int, dict]):
-    """Manage the additional device_id tag.
-
-    Having a dictionary instance per each point seems overkill. However,
-    scanning a database can result in an enormous amount of points and only
-    a small number of devices. The `__missing__` method here ensures that a
-    dictionary instance is allocated *only* for each unique `device_id`.
-    """
-    def __init__(self, base_tags):
-        self._base_tags = base_tags
-        super()
-
-    def __missing__(self, key):
-        item = self._base_tags.copy()
-        item["device_id"] = key
-        return item
-    
-
 def connect_to_influxdb() -> InfluxDBClient:
     options = {
         "host": INFLUXDB_HOST,
@@ -90,24 +73,24 @@ def connect_to_influxdb() -> InfluxDBClient:
     return client
 
 
-def process_db(db_file: str, limit: int):
-    con = sqlite3.connect(db_file)
+def process_device(device_id: int, tags: dict, con: sqlite3.Connection, influx_client: InfluxDBClient, starting_timestamp: int):
     cur = con.cursor()
 
-    client = connect_to_influxdb()
-
-    raw_datapoints = cur.execute('SELECT TIMESTAMP, RAW_INTENSITY, STEPS, RAW_KIND, HEART_RATE, DEVICE_ID FROM `MI_BAND_ACTIVITY_SAMPLE` ORDER BY `TIMESTAMP` DESC LIMIT %d' % limit)
     influx_points = list()
-
-    base_tags = EXTRA_TAGS
-    base_tags["origin"] = "gbsquare"    
-    tags = TaggingDeviceID(base_tags)
-
     i = 0
-    for timestamp, raw_intensity, steps, raw_kind, heart_rate, device_id in raw_datapoints:
+
+    raw_datapoints = cur.execute(f"""
+        SELECT TIMESTAMP, RAW_INTENSITY, STEPS, RAW_KIND, HEART_RATE 
+        FROM `MI_BAND_ACTIVITY_SAMPLE`
+        WHERE `DEVICE_ID`="{device_id}" 
+            AND `TIMESTAMP` > {starting_timestamp}
+        ORDER BY `TIMESTAMP` DESC
+    """)
+
+    for timestamp, raw_intensity, steps, raw_kind, heart_rate in raw_datapoints:
         p = {
             "measurement": "miBandActivitySample",
-            "tags": tags[int(device_id)],
+            "tags": tags,
             "time": timestamp,
             "fields": {
                 "raw_intensity": raw_intensity,
@@ -121,13 +104,50 @@ def process_db(db_file: str, limit: int):
         i += 1
         if i > MAX_POINTS_PER_REQUEST:
             logger.debug("Reached MAX_POINTS_PER_REQUEST (#%d), writing to InfluxDB", MAX_POINTS_PER_REQUEST)
-            client.write_points(influx_points, time_precision="s")
+            influx_client.write_points(influx_points, time_precision="s")
             influx_points.clear()
             i = 0
 
-    logger.debug("I found a total of %d devices: %s", len(tags), list(tags.keys()))
+    influx_client.write_points(influx_points, time_precision="s")
+    cur.close()
 
-    client.write_points(influx_points, time_precision="s")
+
+def process_db(db_file: str, force_sync: bool):
+    con = sqlite3.connect(db_file)
+    cur = con.cursor()
+
+    client = connect_to_influxdb()
+    devices = cur.execute('SELECT _id FROM `DEVICE`')
+
+    for device, in devices:
+        device_id = int(device)
+        logger.debug("Processing device %d", device_id)
+
+        tags = EXTRA_TAGS.copy()
+        tags["origin"] = "gbsquare"
+        tags["device_id"] = device_id
+
+        if force_sync:
+            ts = 0
+            logger.info("Retrieving info for device %d, forcing full sync", device_id)
+        else:
+            last_influx_entry = client.query(
+                f"""
+                SELECT heart_rate
+                FROM miband.autogen.miBandActivitySample
+                WHERE "user"='{USER_TAG}' 
+                    AND "device_id"='{device_id}'
+                ORDER BY time DESC 
+                LIMIT 1
+            """)
+            last_time = list(last_influx_entry.get_points())[0]["time"]
+            dt = datetime.fromisoformat(last_time)
+            ts = dt.timestamp()
+
+            logger.info("Retrieving info for device %d since %s", device_id, ts)
+
+        process_device(device_id, tags, con, client, ts)
+        
     con.close()
 
 
@@ -148,7 +168,7 @@ def check_and_process_db(webdav_client: Client, force_sync=False) -> bool:
     logger.info("Proceeding to download new version of GadgetBridge database")
     with NamedTemporaryFile() as file:
         webdav_client.download(remote_path=WEBDAV_PATH, local_path=file.name)
-        process_db(file.name, limit=-1 if force_sync else ENTRIES_TO_SYNC)
+        process_db(file.name, force_sync)
 
     return True
 
