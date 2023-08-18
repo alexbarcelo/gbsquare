@@ -8,6 +8,7 @@ import os
 import sqlite3
 from tempfile import NamedTemporaryFile
 from time import sleep
+import yaml
 from influxdb import InfluxDBClient
 
 import requests
@@ -27,7 +28,8 @@ INFLUXDB_USERNAME = os.getenv("INFLUXDB_USERNAME")
 INFLUXDB_PASSWORD = os.getenv("INFLUXDB_PASSWORD")
 INFLUXDB_SSL = strtobool(os.getenv("INFLUXDB_SSL", "False"))
 INFLUXDB_VERIFY_SSL = strtobool(os.getenv("INFLUXDB_VERIFY_SSL", "False"))
-INFLUXDB_DATABASE = os.getenv("INFLUXDB_DATABASE", "miband")
+INFLUXDB_DATABASE = os.getenv("INFLUXDB_DATABASE", "gbdata")
+INFLUXDB_MEASUREMENT = os.getenv("INFLUXDB_MEASUREMENT", "activitySample")
 
 # The username, used for tagging data on influxdb as well as triggering webhooks on update
 USER_TAG = os.getenv("USER_TAG")
@@ -52,6 +54,11 @@ DEBUG = strtobool(os.getenv("DEBUG", "False"))
 MAX_POINTS_PER_REQUEST = 20000
 ETAG_DB = None
 
+DEVICE_PARAMETERS = None
+
+with open("config.yml") as f:
+    DEVICE_PARAMETERS = yaml.load(f, Loader=yaml.Loader)
+
 logger = logging.getLogger('gbsquare')
 
 
@@ -73,42 +80,69 @@ def connect_to_influxdb() -> InfluxDBClient:
     return client
 
 
-def process_device(device_id: int, tags: dict, con: sqlite3.Connection, influx_client: InfluxDBClient, starting_timestamp: int):
-    cur = con.cursor()
+def process_device(device_id: int, device_metadata: dict, tags: dict, con: sqlite3.Connection, influx_client: InfluxDBClient, force_sync: bool):
 
-    influx_points = list()
-    i = 0
+    for measurement in device_metadata['measurements']:
 
-    raw_datapoints = cur.execute(f"""
-        SELECT TIMESTAMP, RAW_INTENSITY, STEPS, RAW_KIND, HEART_RATE 
-        FROM `MI_BAND_ACTIVITY_SAMPLE`
-        WHERE `DEVICE_ID`="{device_id}" 
-            AND `TIMESTAMP` > {starting_timestamp}
-        ORDER BY `TIMESTAMP` DESC
-    """)
+        # Get last timestamp in influxdb to know when we need to update
+        if force_sync:
+            starting_timestamp = 0
+            logger.info("Retrieving info for device %d, forcing full sync", device_id)
+        else:
+            last_influx_entry = influx_client.query(
+                f"""
+                SELECT {measurement['name']}
+                FROM {INFLUXDB_DATABASE}.autogen.{INFLUXDB_MEASUREMENT}
+                WHERE "user"='{USER_TAG}' 
+                    AND "device_id"='{device_id}'
+                ORDER BY time DESC 
+                LIMIT 1
+            """)
+            if len(list(last_influx_entry.get_points())) > 0:
+                last_time = list(last_influx_entry.get_points())[0]["time"]
+                dt = datetime.fromisoformat(last_time)
+                starting_timestamp = dt.timestamp()
+                logger.info("Retrieving info for device %d since %s for measurement '%s'", device_id, starting_timestamp, measurement['name'])
+            else:
+                starting_timestamp = 0
+                logger.info("No data yet for device device %d and measurement '%s'", device_id, measurement['name'])
 
-    for timestamp, raw_intensity, steps, raw_kind, heart_rate in raw_datapoints:
-        p = {
-            "measurement": "miBandActivitySample",
-            "tags": tags,
-            "time": timestamp,
-            "fields": {
-                "raw_intensity": raw_intensity,
-                "steps": steps,
-                "raw_kind": raw_kind,
-                "heart_rate": heart_rate,
+
+        cur = con.cursor()
+
+        influx_points = list()
+        i = 0
+
+        # Get data from gadgetbridge sqlite database
+        query_str = f"""
+            SELECT TIMESTAMP, {measurement['field']} 
+            FROM `{measurement['table']}`
+            WHERE `DEVICE_ID`="{device_id}" 
+                AND `TIMESTAMP` > {starting_timestamp}
+            ORDER BY `TIMESTAMP` DESC
+        """
+
+        raw_datapoints = cur.execute(query_str)
+        # Write data into influxdb
+        for timestamp, measure in raw_datapoints:
+            p = {
+                "measurement": INFLUXDB_MEASUREMENT,
+                "tags": tags,
+                "time": timestamp,
+                "fields": {
+                    measurement['name']: int(measure)
+                }
             }
-        }
-        influx_points.append(p)
+            influx_points.append(p)
 
-        i += 1
-        if i > MAX_POINTS_PER_REQUEST:
-            logger.debug("Reached MAX_POINTS_PER_REQUEST (#%d), writing to InfluxDB", MAX_POINTS_PER_REQUEST)
-            influx_client.write_points(influx_points, time_precision="s")
-            influx_points.clear()
-            i = 0
+            i += 1
+            if i > MAX_POINTS_PER_REQUEST:
+                logger.debug("Reached MAX_POINTS_PER_REQUEST (#%d), writing to InfluxDB", MAX_POINTS_PER_REQUEST)
+                influx_client.write_points(influx_points, time_precision=measurement['precision'])
+                influx_points.clear()
+                i = 0
 
-    influx_client.write_points(influx_points, time_precision="s")
+        influx_client.write_points(influx_points, time_precision=measurement['precision'])
     cur.close()
 
 
@@ -117,36 +151,26 @@ def process_db(db_file: str, force_sync: bool):
     cur = con.cursor()
 
     client = connect_to_influxdb()
-    devices = cur.execute('SELECT _id FROM `DEVICE`')
+    devices = cur.execute('SELECT _id, TYPE  FROM `DEVICE`')
 
-    for device, in devices:
-        device_id = int(device)
-        logger.debug("Processing device %d", device_id)
+    for device_id, device_type in devices:
+        device_id = int(device_id)
+        device_type = int(device_type)
+        device_metadata = None
+        for d in DEVICE_PARAMETERS:
+            if d['device_type'] == device_type:
+                device_metadata = d
+        if not device_metadata:
+            logger.error("Device type %d not recognised", device_type)
+            return
+        logger.debug("Processing device %d of type %s", device_id, device_metadata['device_name'])
 
         tags = EXTRA_TAGS.copy()
         tags["origin"] = "gbsquare"
         tags["device_id"] = device_id
+        tags["device_type"] = device_metadata['device_name']
 
-        if force_sync:
-            ts = 0
-            logger.info("Retrieving info for device %d, forcing full sync", device_id)
-        else:
-            last_influx_entry = client.query(
-                f"""
-                SELECT heart_rate
-                FROM miband.autogen.miBandActivitySample
-                WHERE "user"='{USER_TAG}' 
-                    AND "device_id"='{device_id}'
-                ORDER BY time DESC 
-                LIMIT 1
-            """)
-            last_time = list(last_influx_entry.get_points())[0]["time"]
-            dt = datetime.fromisoformat(last_time)
-            ts = dt.timestamp()
-
-            logger.info("Retrieving info for device %d since %s", device_id, ts)
-
-        process_device(device_id, tags, con, client, ts)
+        process_device(device_id, device_metadata, tags, con, client, force_sync)
         
     con.close()
 
@@ -210,7 +234,7 @@ def main():
     })
 
     # Note that the check will always evaluate as True on startup
-    check_and_process_db(webdav_client, force_sync=True)
+    check_and_process_db(webdav_client, force_sync=False)
 
     trigger_webhook()
 

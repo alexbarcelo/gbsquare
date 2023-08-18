@@ -6,3 +6,6 @@ webdavclient3
 
 # Only required when webhook is configured
 requests
+
+# Parse configuration
+pyyaml

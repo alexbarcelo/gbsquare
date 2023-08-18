@@ -1,0 +1,128 @@
+- device_name: miband_4
+  device_type: 16
+  measurements:
+    - name: heart_rate
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: HEART_RATE
+      precision: s
+    - name: raw_intensity
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: RAW_INTENSITY
+      precision: s
+    - name: raw_kind
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: RAW_KIND
+      precision: s
+    - name: steps
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: STEPS
+      precision: s
+
+- device_name: miband_6
+  device_type: 37
+  measurements:
+    - name: heart_rate
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: HEART_RATE
+      precision: s
+    - name: raw_intensity
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: RAW_INTENSITY
+      precision: s
+    - name: raw_kind
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: RAW_KIND
+      precision: s
+    - name: steps
+      table: MI_BAND_ACTIVITY_SAMPLE
+      field: STEPS
+      precision: s
+
+
+- device_name: miband_7
+  device_type: 10041
+  measurements:
+    - name: heart_rate
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: HEART_RATE
+      precision: s
+    - name: raw_intensity
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: RAW_INTENSITY
+      precision: s
+    - name: raw_kind
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: RAW_KIND
+      precision: s
+    - name: steps
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: STEPS
+      precision: s
+    - name: sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: SLEEP
+      precision: s
+    - name: deep_sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: DEEP_SLEEP
+      precision: s
+    - name: rem_sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: REM_SLEEP
+      precision: s
+    - name: stress
+      table: HUAMI_STRESS_SAMPLE
+      field: STRESS
+      precision: ms
+
+- device_name: amazfit_gtr_4
+  device_type: 10044
+  measurements:
+    - name: heart_rate
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: HEART_RATE
+      precision: s
+    - name: raw_intensity
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: RAW_INTENSITY
+      precision: s
+    - name: raw_kind
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: RAW_KIND
+      precision: s
+    - name: steps
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: STEPS
+      precision: s
+    - name: sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: SLEEP
+      precision: s
+    - name: deep_sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: DEEP_SLEEP
+      precision: s
+    - name: rem_sleep
+      table: HUAMI_EXTENDED_ACTIVITY_SAMPLE
+      field: REM_SLEEP
+      precision: s
+    - name: stress
+      table: HUAMI_STRESS_SAMPLE
+      field: STRESS
+      precision: ms
+    - name: max_heart_rate
+      table: HUAMI_HEART_RATE_MAX_SAMPLE
+      field: HEART_RATE
+      precision: ms
+    - name: resting_heart_rate
+      table: HUAMI_HEART_RATE_RESTING_SAMPLE
+      field: HEART_RATE
+      precision: ms
+    - name: sleep_respiratory_rate
+      table: HUAMI_SLEEP_RESPIRATORY_RATE_SAMPLE
+      field: RATE
+      precision: ms
+    - name: spo2
+      table: HUAMI_SPO2_SAMPLE
+      field: SPO2
+      precision: ms
